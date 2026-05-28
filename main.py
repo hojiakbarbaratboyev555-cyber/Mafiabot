@@ -42,7 +42,7 @@ if not BOT_TOKEN:
 # WEBHOOK
 # ======================================================
 
-WEBHOOK_HOST = "https://YOUR-BOT.onrender.com"
+WEBHOOK_HOST = "https://mafiabot-dri8.onrender.com"
 WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
 WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
 
