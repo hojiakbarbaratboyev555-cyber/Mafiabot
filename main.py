@@ -10,11 +10,11 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ===================== SOZLAMALAR =====================
-BOT_TOKEN = "YOUR_BOT_TOKEN"
-ADMIN_GROUP_ID = -100123456789  # Admin guruh ID
-CHANNEL_ID = "@your_channel"   # Asosiy kanal username
-ADMIN_URL = "https://t.me/your_admin"  # Admin URL
-REQUIRED_CHANNEL = "@your_required_channel"  # Majburiy obuna kanali
+BOT_TOKEN = "8387661156:AAE7dQc6jRIivvhlACwrC3jGLhfPw8KgK-c"
+ADMIN_GROUP_ID = -5168141912  # Admin guruh ID
+CHANNEL_ID = "https://t.me/uzb_ads"   # Asosiy kanal username
+ADMIN_URL = "https://t.me/HB7410_bot"  # Admin URL
+REQUIRED_CHANNEL = "https://t.me/uzb_ads"  # Majburiy obuna kanali
 
 # ===================== HOLATLAR =====================
 (
