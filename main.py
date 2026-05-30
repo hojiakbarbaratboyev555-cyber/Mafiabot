@@ -1,566 +1,621 @@
 import logging
-import random
 import os
-
-from fastapi import FastAPI, Request
-import uvicorn
-
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup
-)
-
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
-    Application,
-    CommandHandler,
-    CallbackQueryHandler,
-    ContextTypes
+    Application, CommandHandler, MessageHandler, CallbackQueryHandler,
+    filters, ContextTypes, ConversationHandler
 )
 
-# ======================================================
-# LOGGING
-# ======================================================
-
-logging.basicConfig(
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    level=logging.INFO
-)
-
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ======================================================
-# TOKEN
-# ======================================================
+# ===================== SOZLAMALAR =====================
+BOT_TOKEN = "YOUR_BOT_TOKEN"
+ADMIN_GROUP_ID = -100123456789  # Admin guruh ID
+CHANNEL_ID = "@your_channel"   # Asosiy kanal username
+ADMIN_URL = "https://t.me/your_admin"  # Admin URL
+REQUIRED_CHANNEL = "@your_required_channel"  # Majburiy obuna kanali
 
-BOT_TOKEN = os.environ.get("8401348680:AAFFA_EqERcQu-AKUAXlkKpi4WuIh-TUiK8")
+# ===================== HOLATLAR =====================
+(
+    CHOOSING_TYPE,
+    TG_PHOTO, TG_SUBSCRIBERS, TG_PRICE, TG_PHONE, TG_USERNAME, TG_USER_USERNAME,
+    IG_PHOTO, IG_LINK, IG_SUBSCRIBERS, IG_PRICE, IG_PHONE, IG_USER_USERNAME,
+    GAME_PHOTO, GAME_PRICE, GAME_PHONE, GAME_USER_USERNAME,
+) = range(17)
 
-if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN topilmadi!")
+# ===================== MA'LUMOTLAR SAQLASH =====================
+user_data_store = {}  # { user_id: { "orders": [...] } }
+pending_orders = {}   # { order_id: { ...order data... } }
+order_counter = [0]
 
-# ======================================================
-# WEBHOOK
-# ======================================================
+def new_order_id():
+    order_counter[0] += 1
+    return order_counter[0]
 
-WEBHOOK_HOST = "https://mafiabot-dri8.onrender.com"
-WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
-WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
+GAME_TYPES = ["DLS", "FC Mobile", "PUBG", "Freefire", "Efootball", "MLBB", "Boshqa"]
 
-PORT = int(os.environ.get("PORT", 10000))
+# ===================== OBUNA TEKSHIRISH =====================
+async def check_subscription(user_id: int, bot) -> bool:
+    try:
+        member = await bot.get_chat_member(REQUIRED_CHANNEL, user_id)
+        return member.status in ["member", "administrator", "creator"]
+    except:
+        return False
 
-# ======================================================
-# ROLLAR
-# ======================================================
+async def subscription_keyboard():
+    keyboard = [
+        [InlineKeyboardButton("📢 Kanalga o'tish", url=f"https://t.me/{REQUIRED_CHANNEL.lstrip('@')}")],
+        [InlineKeyboardButton("✅ Tekshirish", callback_data="check_sub")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
 
-ROLES = {
-    "mafia": {
-        "name": "🔴 Mafiya",
-        "description": "Siz Mafiyasiz!\nKechasi jamoa bilan birgalikda bir kishini o'ldirasiz.",
-        "team": "mafia"
-    },
+# ===================== ASOSIY MENYU =====================
+def main_menu_keyboard():
+    keyboard = [
+        [KeyboardButton("🛒 Buyurtma berish")],
+        [KeyboardButton("📦 Akkauntlarim")],
+        [KeyboardButton("👨‍💼 Admin bilan bog'lanish")]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
-    "don": {
-        "name": "🔴 Don",
-        "description": "Siz Don siz!\nMafiya bossi.",
-        "team": "mafia"
-    },
-
-    "citizen": {
-        "name": "🟢 Tinch aholi",
-        "description": "Siz Tinch aholisiz!",
-        "team": "citizen"
-    },
-
-    "sheriff": {
-        "name": "🔵 Komissar",
-        "description": "Siz Komissarsiz!",
-        "team": "citizen"
-    },
-
-    "sergeant": {
-        "name": "🔵 Serjant",
-        "description": "Siz Serjant siz!",
-        "team": "citizen"
-    },
-
-    "doctor": {
-        "name": "⚪ Shifokor",
-        "description": "Siz Shifokorsiz!",
-        "team": "citizen"
-    },
-
-    "maniac": {
-        "name": "⚫ Maniac",
-        "description": "Siz Maniaksiz!",
-        "team": "maniac"
-    },
-}
-
-# ======================================================
-# ROLE DISTRIBUTION
-# ======================================================
-
-def get_roles_for_count(count: int):
-
-    if count == 4:
-        return ["mafia", "sheriff", "doctor", "citizen"]
-
-    elif count == 5:
-        return ["mafia", "sheriff", "doctor", "citizen", "citizen"]
-
-    elif count == 6:
-        return ["mafia", "mafia", "sheriff", "doctor", "citizen", "citizen"]
-
-    elif count == 7:
-        return [
-            "mafia",
-            "mafia",
-            "sheriff",
-            "doctor",
-            "sergeant",
-            "citizen",
-            "citizen"
-        ]
-
-    elif count == 8:
-        return [
-            "mafia",
-            "mafia",
-            "don",
-            "sheriff",
-            "doctor",
-            "sergeant",
-            "citizen",
-            "citizen"
-        ]
-
-    elif count <= 10:
-        return [
-            "mafia",
-            "mafia",
-            "don",
-            "sheriff",
-            "doctor",
-            "sergeant",
-            "maniac"
-        ] + ["citizen"] * (count - 7)
-
-    elif count <= 15:
-        return [
-            "mafia",
-            "mafia",
-            "mafia",
-            "don",
-            "sheriff",
-            "doctor",
-            "sergeant",
-            "maniac"
-        ] + ["citizen"] * (count - 8)
-
-    else:
-        return [
-            "mafia",
-            "mafia",
-            "mafia",
-            "don",
-            "don",
-            "sheriff",
-            "doctor",
-            "sergeant",
-            "maniac"
-        ] + ["citizen"] * (count - 9)
-
-# ======================================================
-# GAME STORAGE
-# ======================================================
-
-games = {}
-
-def new_game(chat_id):
-
-    return {
-        "chat_id": chat_id,
-        "status": "registration",
-        "players": {},
-        "message_id": None
-    }
-
-# ======================================================
-# HELPERS
-# ======================================================
-
-def players_list_text(game):
-
-    players = game["players"]
-
-    if not players:
-        return "Hozircha hech kim yo'q."
-
-    names = [p["name"] for p in players.values()]
-
-    return "\n".join(
-        f"{i+1}. {name}"
-        for i, name in enumerate(names)
-    )
-
-def registration_text(game):
-
-    count = len(game["players"])
-
-    return (
-        "📋 Ro'yxatdan o'tish davom etmoqda\n\n"
-        f"{players_list_text(game)}\n\n"
-        f"👥 Jami: {count} ta odam"
-    )
-
-def join_button(bot_username, chat_id):
-
-    url = f"https://t.me/{bot_username}?start=join_{chat_id}"
-
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                "➕ Qo'shilish",
-                url=url
-            )
-        ]
-    ])
-
-async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
-
-    admins = await context.bot.get_chat_administrators(chat_id)
-
-    return any(admin.user.id == user_id for admin in admins)
-
-# ======================================================
-# /game
-# ======================================================
-
-async def cmd_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    chat = update.effective_chat
-
-    if chat.type == "private":
-
-        await update.message.reply_text(
-            "Bu komanda faqat guruhda ishlaydi."
-        )
-        return
-
-    chat_id = chat.id
-
-    if chat_id in games:
-
-        await update.message.reply_text(
-            "O'yin allaqachon mavjud."
-        )
-        return
-
-    games[chat_id] = new_game(chat_id)
-
-    text = registration_text(games[chat_id])
-
-    keyboard = join_button(
-        context.bot.username,
-        chat_id
-    )
-
-    msg = await update.message.reply_text(
-        text,
-        reply_markup=keyboard
-    )
-
-    games[chat_id]["message_id"] = msg.message_id
-
-# ======================================================
-# /start
-# ======================================================
-
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    chat = update.effective_chat
+# ===================== /start =====================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    args = context.args
+    is_subscribed = await check_subscription(user.id, context.bot)
 
-    if (
-        chat.type == "private"
-        and args
-        and args[0].startswith("join_")
-    ):
-
-        try:
-            group_chat_id = int(
-                args[0].split("_")[1]
-            )
-
-        except:
-            await update.message.reply_text(
-                "Noto'g'ri havola."
-            )
-            return
-
-        if group_chat_id not in games:
-
-            await update.message.reply_text(
-                "O'yin topilmadi."
-            )
-            return
-
-        game = games[group_chat_id]
-
-        if game["status"] != "registration":
-
-            await update.message.reply_text(
-                "Ro'yxatdan o'tish tugagan."
-            )
-            return
-
-        if user.id in game["players"]:
-
-            await update.message.reply_text(
-                "Siz allaqachon qo'shilgansiz."
-            )
-            return
-
-        game["players"][user.id] = {
-            "name": user.first_name,
-            "role": None,
-            "alive": True
-        }
-
-        try:
-
-            await context.bot.edit_message_text(
-                chat_id=group_chat_id,
-                message_id=game["message_id"],
-                text=registration_text(game),
-                reply_markup=join_button(
-                    context.bot.username,
-                    group_chat_id
-                )
-            )
-
-        except:
-            pass
-
+    if not is_subscribed:
         await update.message.reply_text(
-            "🎉 O'yinga qo'shildingiz."
-        )
-
-        return
-
-    # GROUP START
-
-    if chat.type in ["group", "supergroup"]:
-
-        if not await is_admin(update, context):
-
-            await update.message.reply_text(
-                "Faqat admin boshlaydi."
-            )
-            return
-
-        chat_id = chat.id
-
-        if chat_id not in games:
-
-            await update.message.reply_text(
-                "Avval /game yozing."
-            )
-            return
-
-        game = games[chat_id]
-
-        count = len(game["players"])
-
-        if count < 4:
-
-            await update.message.reply_text(
-                "Kamida 4 ta o'yinchi kerak."
-            )
-            return
-
-        roles = get_roles_for_count(count)
-
-        random.shuffle(roles)
-
-        for i, (uid, player) in enumerate(game["players"].items()):
-
-            player["role"] = roles[i]
-
-        game["status"] = "started"
-
-        await update.message.reply_text(
-            "🎮 O'yin boshlandi!"
-        )
-
-        for uid, player in game["players"].items():
-
-            role = ROLES[player["role"]]
-
-            keyboard = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(
-                        "🎭 Rolni ko'rish",
-                        callback_data=f"role_{chat_id}_{uid}"
-                    )
-                ]
-            ])
-
-            try:
-
-                await context.bot.send_message(
-                    chat_id=uid,
-                    text="🎮 O'yin boshlandi!",
-                    reply_markup=keyboard
-                )
-
-            except Exception as e:
-
-                logger.warning(
-                    f"PM yuborilmadi {uid}: {e}"
-                )
-
-# ======================================================
-# /leave
-# ======================================================
-
-async def cmd_leave(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    chat = update.effective_chat
-    user = update.effective_user
-
-    if chat.type == "private":
-        return
-
-    chat_id = chat.id
-
-    if chat_id not in games:
-
-        await update.message.reply_text(
-            "O'yin mavjud emas."
+            "❗ Botdan to'liq foydalanish uchun quyidagi kanalga obuna bo'ling:",
+            reply_markup=await subscription_keyboard()
         )
         return
-
-    game = games[chat_id]
-
-    if user.id not in game["players"]:
-
-        await update.message.reply_text(
-            "Siz o'yinda emassiz."
-        )
-        return
-
-    del game["players"][user.id]
 
     await update.message.reply_text(
-        f"{user.first_name} chiqib ketdi."
+        f"👋 Salom, {user.first_name}!\n\nSiz asosiy menudasiz.",
+        reply_markup=main_menu_keyboard()
     )
 
-# ======================================================
-# CALLBACK
-# ======================================================
-
-async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
+async def check_sub_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-
     await query.answer()
+    user = query.from_user
+    is_subscribed = await check_subscription(user.id, context.bot)
 
-    data = query.data
-
-    if data.startswith("role_"):
-
-        parts = data.split("_")
-
-        chat_id = int(parts[1])
-        uid = int(parts[2])
-
-        if query.from_user.id != uid:
-
-            await query.answer(
-                "Bu sizning rolingiz emas.",
-                show_alert=True
-            )
-            return
-
-        game = games.get(chat_id)
-
-        if not game:
-            return
-
-        player = game["players"].get(uid)
-
-        if not player:
-            return
-
-        role = ROLES[player["role"]]
-
-        await query.message.reply_text(
-            f"{role['name']}\n\n{role['description']}"
+    if is_subscribed:
+        await query.message.edit_text(
+            f"✅ Salom, {user.first_name}!\n\nSiz asosiy menudasiz."
+        )
+        await context.bot.send_message(
+            chat_id=user.id,
+            text="Asosiy menyu:",
+            reply_markup=main_menu_keyboard()
+        )
+    else:
+        await query.message.edit_text(
+            "❗ Botdan to'liq foydalanish uchun quyidagi kanalga obuna bo'ling:",
+            reply_markup=await subscription_keyboard()
         )
 
-# ======================================================
-# APP
-# ======================================================
+# ===================== BUYURTMA BERISH =====================
+async def order_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    is_subscribed = await check_subscription(user.id, context.bot)
+    if not is_subscribed:
+        await update.message.reply_text(
+            "❗ Botdan to'liq foydalanish uchun quyidagi kanalga obuna bo'ling:",
+            reply_markup=await subscription_keyboard()
+        )
+        return ConversationHandler.END
 
-application = Application.builder().token(BOT_TOKEN).build()
+    context.user_data.clear()
+    keyboard = [
+        [KeyboardButton("Telegram"), KeyboardButton("Instagram"), KeyboardButton("DLS")],
+        [KeyboardButton("FC Mobile"), KeyboardButton("PUBG"), KeyboardButton("Freefire")],
+        [KeyboardButton("Efootball"), KeyboardButton("MLBB"), KeyboardButton("Boshqa")],
+        [KeyboardButton("🏠 Asosiy menu")]
+    ]
+    await update.message.reply_text(
+        "📱 Siz o'z akkauntingizni biz bilan birga sotmoqchisiz.\n\nAkkaunt turini tanlang:",
+        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    )
+    return CHOOSING_TYPE
 
-application.add_handler(CommandHandler("game", cmd_game))
-application.add_handler(CommandHandler("start", cmd_start))
-application.add_handler(CommandHandler("leave", cmd_leave))
-application.add_handler(CallbackQueryHandler(callback_handler))
+async def choose_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    if text == "🏠 Asosiy menu":
+        await update.message.reply_text("Asosiy menyu:", reply_markup=main_menu_keyboard())
+        return ConversationHandler.END
 
-# ======================================================
-# FASTAPI
-# ======================================================
+    context.user_data["type"] = text
 
-app = FastAPI()
+    if text == "Telegram":
+        await update.message.reply_text(
+            "📸 Kanal yoki Guruh rasmini yuboring:",
+            reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🏠 Asosiy menu")]], resize_keyboard=True)
+        )
+        return TG_PHOTO
+    elif text == "Instagram":
+        await update.message.reply_text(
+            "📸 Instagram sahifangiz rasmini yuboring:",
+            reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🏠 Asosiy menu")]], resize_keyboard=True)
+        )
+        return IG_PHOTO
+    elif text in GAME_TYPES:
+        await update.message.reply_text(
+            "📸 Akkaunt rasmini yuboring:",
+            reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🏠 Asosiy menu")]], resize_keyboard=True)
+        )
+        return GAME_PHOTO
+    else:
+        await update.message.reply_text("❌ Noto'g'ri tanlov. Qaytadan tanlang.")
+        return CHOOSING_TYPE
 
-@app.on_event("startup")
-async def startup():
+# ===================== TELEGRAM =====================
+async def tg_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.text == "🏠 Asosiy menu":
+        await update.message.reply_text("Asosiy menyu:", reply_markup=main_menu_keyboard())
+        return ConversationHandler.END
+    if not update.message.photo:
+        await update.message.reply_text("❗ Iltimos, rasm yuboring.")
+        return TG_PHOTO
+    context.user_data["photo"] = update.message.photo[-1].file_id
+    await update.message.reply_text("👥 Obunachilar sonini kiriting:")
+    return TG_SUBSCRIBERS
 
-    await application.initialize()
-    await application.start()
+async def tg_subscribers(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.text == "🏠 Asosiy menu":
+        await update.message.reply_text("Asosiy menyu:", reply_markup=main_menu_keyboard())
+        return ConversationHandler.END
+    context.user_data["subscribers"] = update.message.text
+    await update.message.reply_text("💰 Narxni kiriting (so'm):")
+    return TG_PRICE
 
-    await application.bot.set_webhook(
-        WEBHOOK_URL
+async def tg_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.text == "🏠 Asosiy menu":
+        await update.message.reply_text("Asosiy menyu:", reply_markup=main_menu_keyboard())
+        return ConversationHandler.END
+    context.user_data["price"] = update.message.text
+    await update.message.reply_text(
+        "📞 Telefon raqamingizni kiriting:\n\nNamuna: +998901234567"
+    )
+    return TG_PHONE
+
+async def tg_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.text == "🏠 Asosiy menu":
+        await update.message.reply_text("Asosiy menyu:", reply_markup=main_menu_keyboard())
+        return ConversationHandler.END
+    phone = update.message.text.strip()
+    import re
+    if not re.match(r'^\+998\d{9}$', phone):
+        await update.message.reply_text(
+            "❗ Telefon raqam noto'g'ri formatda.\n\nNamuna: +998901234567\n\nQaytadan kiriting:"
+        )
+        return TG_PHONE
+    context.user_data["phone"] = phone
+    await update.message.reply_text("🔗 Kanal username kiriting (masalan: @kanal_nomi):")
+    return TG_USERNAME
+
+async def tg_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.text == "🏠 Asosiy menu":
+        await update.message.reply_text("Asosiy menyu:", reply_markup=main_menu_keyboard())
+        return ConversationHandler.END
+    context.user_data["channel_username"] = update.message.text
+    await update.message.reply_text("👤 Sizning Telegram username ingizni kiriting (masalan: @username):")
+    return TG_USER_USERNAME
+
+async def tg_user_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.text == "🏠 Asosiy menu":
+        await update.message.reply_text("Asosiy menyu:", reply_markup=main_menu_keyboard())
+        return ConversationHandler.END
+    context.user_data["user_username"] = update.message.text
+    await show_order_summary(update, context)
+    return ConversationHandler.END
+
+# ===================== INSTAGRAM =====================
+async def ig_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.text == "🏠 Asosiy menu":
+        await update.message.reply_text("Asosiy menyu:", reply_markup=main_menu_keyboard())
+        return ConversationHandler.END
+    if not update.message.photo:
+        await update.message.reply_text("❗ Iltimos, rasm yuboring.")
+        return IG_PHOTO
+    context.user_data["photo"] = update.message.photo[-1].file_id
+    await update.message.reply_text("🔗 Instagram sahifa silkasini (link) kiriting:")
+    return IG_LINK
+
+async def ig_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.text == "🏠 Asosiy menu":
+        await update.message.reply_text("Asosiy menyu:", reply_markup=main_menu_keyboard())
+        return ConversationHandler.END
+    context.user_data["ig_link"] = update.message.text
+    await update.message.reply_text("👥 Obunachilar sonini kiriting:")
+    return IG_SUBSCRIBERS
+
+async def ig_subscribers(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.text == "🏠 Asosiy menu":
+        await update.message.reply_text("Asosiy menyu:", reply_markup=main_menu_keyboard())
+        return ConversationHandler.END
+    context.user_data["subscribers"] = update.message.text
+    await update.message.reply_text("💰 Narxni kiriting (so'm):")
+    return IG_PRICE
+
+async def ig_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.text == "🏠 Asosiy menu":
+        await update.message.reply_text("Asosiy menyu:", reply_markup=main_menu_keyboard())
+        return ConversationHandler.END
+    context.user_data["price"] = update.message.text
+    await update.message.reply_text("📞 Telefon raqamingizni kiriting:\n\nNamuna: +998901234567")
+    return IG_PHONE
+
+async def ig_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.text == "🏠 Asosiy menu":
+        await update.message.reply_text("Asosiy menyu:", reply_markup=main_menu_keyboard())
+        return ConversationHandler.END
+    phone = update.message.text.strip()
+    import re
+    if not re.match(r'^\+998\d{9}$', phone):
+        await update.message.reply_text(
+            "❗ Telefon raqam noto'g'ri formatda.\n\nNamuna: +998901234567\n\nQaytadan kiriting:"
+        )
+        return IG_PHONE
+    context.user_data["phone"] = phone
+    await update.message.reply_text("👤 Sizning Telegram username ingizni kiriting (masalan: @username):")
+    return IG_USER_USERNAME
+
+async def ig_user_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.text == "🏠 Asosiy menu":
+        await update.message.reply_text("Asosiy menyu:", reply_markup=main_menu_keyboard())
+        return ConversationHandler.END
+    context.user_data["user_username"] = update.message.text
+    await show_order_summary(update, context)
+    return ConversationHandler.END
+
+# ===================== O'YIN AKKAUNTLARI =====================
+async def game_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.text == "🏠 Asosiy menu":
+        await update.message.reply_text("Asosiy menyu:", reply_markup=main_menu_keyboard())
+        return ConversationHandler.END
+    if not update.message.photo:
+        await update.message.reply_text("❗ Iltimos, rasm yuboring.")
+        return GAME_PHOTO
+    context.user_data["photo"] = update.message.photo[-1].file_id
+    await update.message.reply_text("💰 Narxni kiriting (so'm):")
+    return GAME_PRICE
+
+async def game_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.text == "🏠 Asosiy menu":
+        await update.message.reply_text("Asosiy menyu:", reply_markup=main_menu_keyboard())
+        return ConversationHandler.END
+    context.user_data["price"] = update.message.text
+    await update.message.reply_text("📞 Telefon raqamingizni kiriting:\n\nNamuna: +998901234567")
+    return GAME_PHONE
+
+async def game_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.text == "🏠 Asosiy menu":
+        await update.message.reply_text("Asosiy menyu:", reply_markup=main_menu_keyboard())
+        return ConversationHandler.END
+    phone = update.message.text.strip()
+    import re
+    if not re.match(r'^\+998\d{9}$', phone):
+        await update.message.reply_text(
+            "❗ Telefon raqam noto'g'ri formatda.\n\nNamuna: +998901234567\n\nQaytadan kiriting:"
+        )
+        return GAME_PHONE
+    context.user_data["phone"] = phone
+    await update.message.reply_text("👤 Sizning Telegram username ingizni kiriting (masalan: @username):")
+    return GAME_USER_USERNAME
+
+async def game_user_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.text == "🏠 Asosiy menu":
+        await update.message.reply_text("Asosiy menyu:", reply_markup=main_menu_keyboard())
+        return ConversationHandler.END
+    context.user_data["user_username"] = update.message.text
+    await show_order_summary(update, context)
+    return ConversationHandler.END
+
+# ===================== BUYURTMA KO'RSATISH =====================
+def build_caption(data: dict) -> str:
+    acc_type = data.get("type", "")
+    caption = f"📋 <b>Buyurtma ma'lumotlari:</b>\n\n"
+    caption += f"📱 <b>Tur:</b> {acc_type}\n"
+
+    if acc_type == "Telegram":
+        caption += f"👥 <b>Obunachilar:</b> {data.get('subscribers', '')}\n"
+        caption += f"💰 <b>Narx:</b> {data.get('price', '')} so'm\n"
+        caption += f"📞 <b>Telefon:</b> {data.get('phone', '')}\n"
+        caption += f"🔗 <b>Kanal:</b> {data.get('channel_username', '')}\n"
+        caption += f"👤 <b>Egasi:</b> {data.get('user_username', '')}\n"
+    elif acc_type == "Instagram":
+        caption += f"🔗 <b>Sahifa:</b> {data.get('ig_link', '')}\n"
+        caption += f"👥 <b>Obunachilar:</b> {data.get('subscribers', '')}\n"
+        caption += f"💰 <b>Narx:</b> {data.get('price', '')} so'm\n"
+        caption += f"📞 <b>Telefon:</b> {data.get('phone', '')}\n"
+        caption += f"👤 <b>Egasi:</b> {data.get('user_username', '')}\n"
+    else:
+        caption += f"💰 <b>Narx:</b> {data.get('price', '')} so'm\n"
+        caption += f"📞 <b>Telefon:</b> {data.get('phone', '')}\n"
+        caption += f"👤 <b>Egasi:</b> {data.get('user_username', '')}\n"
+
+    return caption
+
+def build_channel_caption(data: dict) -> str:
+    """Kanalga joylash uchun - user va kanal usernamesi yo'q"""
+    acc_type = data.get("type", "")
+    caption = f"📋 <b>Akkaunt sotuvda:</b>\n\n"
+    caption += f"📱 <b>Tur:</b> {acc_type}\n"
+
+    if acc_type == "Telegram":
+        caption += f"👥 <b>Obunachilar:</b> {data.get('subscribers', '')}\n"
+        caption += f"💰 <b>Narx:</b> {data.get('price', '')} so'm\n"
+    elif acc_type == "Instagram":
+        caption += f"👥 <b>Obunachilar:</b> {data.get('subscribers', '')}\n"
+        caption += f"💰 <b>Narx:</b> {data.get('price', '')} so'm\n"
+    else:
+        caption += f"💰 <b>Narx:</b> {data.get('price', '')} so'm\n"
+
+    return caption
+
+async def show_order_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    data = context.user_data
+    user = update.effective_user
+    caption = build_caption(data)
+
+    keyboard = [
+        [
+            InlineKeyboardButton("✅ Tasdiqlash", callback_data="user_confirm"),
+            InlineKeyboardButton("❌ Bekor qilish", callback_data="user_cancel")
+        ]
+    ]
+
+    await context.bot.send_photo(
+        chat_id=user.id,
+        photo=data["photo"],
+        caption=caption,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    # Vaqtincha saqlash
+    pending_orders[f"tmp_{user.id}"] = {**data, "user_id": user.id}
+
+async def user_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user = query.from_user
+
+    tmp_key = f"tmp_{user.id}"
+    data = pending_orders.get(tmp_key)
+    if not data:
+        await query.message.reply_text("❌ Buyurtma topilmadi.")
+        return
+
+    order_id = new_order_id()
+    pending_orders[order_id] = {**data, "message_id": None, "user_id": user.id}
+    del pending_orders[tmp_key]
+
+    # Adminga yuborish
+    admin_caption = build_caption(data) + f"\n🆔 <b>Buyurtma ID:</b> #{order_id}"
+    admin_keyboard = [
+        [
+            InlineKeyboardButton("✅ Tasdiqlash", callback_data=f"admin_confirm_{order_id}"),
+            InlineKeyboardButton("❌ Bekor qilish", callback_data=f"admin_cancel_{order_id}")
+        ]
+    ]
+    msg = await context.bot.send_photo(
+        chat_id=ADMIN_GROUP_ID,
+        photo=data["photo"],
+        caption=admin_caption,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(admin_keyboard)
+    )
+    pending_orders[order_id]["admin_msg_id"] = msg.message_id
+
+    await query.message.edit_caption(
+        caption=build_caption(data) + "\n\n⏳ <b>Buyurtmangiz adminlarga yuborildi. Kuting...</b>",
+        parse_mode="HTML"
     )
 
-    logger.info("Webhook o'rnatildi.")
+async def user_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user = query.from_user
+    tmp_key = f"tmp_{user.id}"
+    if tmp_key in pending_orders:
+        del pending_orders[tmp_key]
+    await query.message.edit_caption(
+        caption="❌ Buyurtma bekor qilindi.",
+        parse_mode="HTML"
+    )
+    await context.bot.send_message(chat_id=user.id, text="Asosiy menyu:", reply_markup=main_menu_keyboard())
 
-@app.post(WEBHOOK_PATH)
-async def webhook(request: Request):
+# ===================== ADMIN TASDIQLASH =====================
+async def admin_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
 
-    data = await request.json()
+    order_id = int(query.data.split("_")[-1])
+    data = pending_orders.get(order_id)
+    if not data:
+        await query.message.reply_text("❌ Buyurtma topilmadi.")
+        return
 
-    update = Update.de_json(
-        data,
-        application.bot
+    # Kanalga joylashtirish
+    channel_caption = build_channel_caption(data)
+    channel_keyboard = [
+        [
+            InlineKeyboardButton("📢 Kanalni ko'rish", url=f"https://t.me/{CHANNEL_ID.lstrip('@')}"),
+            InlineKeyboardButton("🛒 Admin orqali sotib olish", url=ADMIN_URL),
+        ],
+        [InlineKeyboardButton("👤 Egasidan sotib olish", url=f"https://t.me/{data.get('user_username', '').lstrip('@')}")]
+    ]
+    channel_msg = await context.bot.send_photo(
+        chat_id=CHANNEL_ID,
+        photo=data["photo"],
+        caption=channel_caption,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(channel_keyboard)
     )
 
-    await application.process_update(update)
+    # Ma'lumotni saqlash (akkauntlarim uchun)
+    user_id = data["user_id"]
+    if user_id not in user_data_store:
+        user_data_store[user_id] = {"orders": []}
+    user_data_store[user_id]["orders"].append({
+        "order_id": order_id,
+        "data": data,
+        "channel_msg_id": channel_msg.message_id
+    })
 
-    return {"ok": True}
+    # Foydalanuvchiga xabar
+    post_url = f"https://t.me/{CHANNEL_ID.lstrip('@')}/{channel_msg.message_id}"
+    view_keyboard = [[InlineKeyboardButton("👁 Buyurtmani ko'rish", url=post_url)]]
+    await context.bot.send_message(
+        chat_id=user_id,
+        text="✅ Sizning buyurtmangiz tekshiruvdan muvaffaqiyatli o'tdi va kanalga joylandi!",
+        reply_markup=InlineKeyboardMarkup(view_keyboard)
+    )
 
-@app.get("/")
-async def home():
+    # Admin xabarini yangilash
+    await query.message.edit_caption(
+        caption=query.message.caption + "\n\n✅ <b>TASDIQLANDI</b>",
+        parse_mode="HTML"
+    )
+    del pending_orders[order_id]
 
-    return {
-        "status": "running"
-    }
+async def admin_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
 
-# ======================================================
-# RUN
-# ======================================================
+    order_id = int(query.data.split("_")[-1])
+    data = pending_orders.get(order_id)
+    if not data:
+        await query.message.reply_text("❌ Buyurtma topilmadi.")
+        return
+
+    user_id = data["user_id"]
+    await context.bot.send_message(
+        chat_id=user_id,
+        text=(
+            "❌ Sizning buyurtmangiz adminlar tomonidan bekor qilindi.\n\n"
+            "Shikoyatlarni <b>Admin bilan bog'lanish</b> tugmasi orqali yo'llashingiz mumkin."
+        ),
+        parse_mode="HTML",
+        reply_markup=main_menu_keyboard()
+    )
+
+    await query.message.edit_caption(
+        caption=query.message.caption + "\n\n❌ <b>BEKOR QILINDI</b>",
+        parse_mode="HTML"
+    )
+    del pending_orders[order_id]
+
+# ===================== AKKAUNTLARIM =====================
+async def my_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    orders = user_data_store.get(user.id, {}).get("orders", [])
+
+    if not orders:
+        await update.message.reply_text("📦 Sizda hech qanday tasdiqlangan akkaunt yo'q.")
+        return
+
+    for item in orders:
+        data = item["data"]
+        caption = build_channel_caption(data)
+        keyboard = [[InlineKeyboardButton("🗑 O'chirish", callback_data=f"delete_{item['order_id']}")]]
+        await context.bot.send_photo(
+            chat_id=user.id,
+            photo=data["photo"],
+            caption=caption,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+async def delete_order_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user = query.from_user
+
+    order_id = int(query.data.split("_")[-1])
+    orders = user_data_store.get(user.id, {}).get("orders", [])
+    item = next((o for o in orders if o["order_id"] == order_id), None)
+
+    if item:
+        # Kanaldan o'chirish
+        try:
+            await context.bot.delete_message(chat_id=CHANNEL_ID, message_id=item["channel_msg_id"])
+        except:
+            pass
+        user_data_store[user.id]["orders"] = [o for o in orders if o["order_id"] != order_id]
+        await query.message.edit_caption(
+            caption="🗑 Bu akkaunt o'chirildi.",
+            parse_mode="HTML"
+        )
+    else:
+        await query.answer("❌ Topilmadi.", show_alert=True)
+
+# ===================== ADMIN BILAN BOG'LANISH =====================
+async def contact_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [[InlineKeyboardButton("👨‍💼 Admin", url=ADMIN_URL)]]
+    await update.message.reply_text(
+        "📩 Siz adminlarimiz bilan bog'lanishingiz mumkin:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+# ===================== ASOSIY MENYU HANDLER =====================
+async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    if text == "📦 Akkauntlarim":
+        await my_accounts(update, context)
+    elif text == "👨‍💼 Admin bilan bog'lanish":
+        await contact_admin(update, context)
+
+# ===================== BOT ISHGA TUSHIRISH =====================
+def main():
+    app = Application.builder().token(BOT_TOKEN).build()
+
+    conv_handler = ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex("^🛒 Buyurtma berish$"), order_start)],
+        states={
+            CHOOSING_TYPE: [MessageHandler(filters.TEXT & ~filters.COMMAND, choose_type)],
+            # Telegram
+            TG_PHOTO: [MessageHandler(filters.PHOTO | filters.TEXT, tg_photo)],
+            TG_SUBSCRIBERS: [MessageHandler(filters.TEXT & ~filters.COMMAND, tg_subscribers)],
+            TG_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, tg_price)],
+            TG_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, tg_phone)],
+            TG_USERNAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, tg_username)],
+            TG_USER_USERNAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, tg_user_username)],
+            # Instagram
+            IG_PHOTO: [MessageHandler(filters.PHOTO | filters.TEXT, ig_photo)],
+            IG_LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, ig_link)],
+            IG_SUBSCRIBERS: [MessageHandler(filters.TEXT & ~filters.COMMAND, ig_subscribers)],
+            IG_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, ig_price)],
+            IG_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, ig_phone)],
+            IG_USER_USERNAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, ig_user_username)],
+            # O'yin
+            GAME_PHOTO: [MessageHandler(filters.PHOTO | filters.TEXT, game_photo)],
+            GAME_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, game_price)],
+            GAME_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, game_phone)],
+            GAME_USER_USERNAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, game_user_username)],
+        },
+        fallbacks=[CommandHandler("start", start)],
+    )
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(conv_handler)
+    app.add_handler(CallbackQueryHandler(check_sub_callback, pattern="^check_sub$"))
+    app.add_handler(CallbackQueryHandler(user_confirm_callback, pattern="^user_confirm$"))
+    app.add_handler(CallbackQueryHandler(user_cancel_callback, pattern="^user_cancel$"))
+    app.add_handler(CallbackQueryHandler(admin_confirm_callback, pattern="^admin_confirm_"))
+    app.add_handler(CallbackQueryHandler(admin_cancel_callback, pattern="^admin_cancel_"))
+    app.add_handler(CallbackQueryHandler(delete_order_callback, pattern="^delete_"))
+    app.add_handler(MessageHandler(
+        filters.Regex("^(📦 Akkauntlarim|👨‍💼 Admin bilan bog'lanish)$"),
+        main_menu_handler
+    ))
+
+    print("✅ Bot ishga tushdi!")
+    app.run_polling()
 
 if __name__ == "__main__":
-
-    uvicorn.run(
-        app,
-        host="0.0.0.0",
-        port=PORT
-    )
+    main()
+    
